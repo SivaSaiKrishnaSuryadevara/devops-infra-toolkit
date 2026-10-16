@@ -1,7 +1,7 @@
 # devops-infra-toolkit
 
 Infrastructure-as-code examples for deploying containerized services, using
-[predictive-cicd-remediation](https://github.com/saikrishna6323/predictive-cicd-remediation)
+[predictive-cicd-remediation](https://github.com/SivaSaiKrishnaSuryadevara/predictive-cicd-remediation)
 as the reference workload.
 
 ## Contents
