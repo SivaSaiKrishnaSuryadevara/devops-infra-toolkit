@@ -1,0 +1,153 @@
+name: fastapi-platform
+
+# Shared hardening, merged into every service
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+x-api-image: &api-image
+  build:
+    context: ./api
+  image: fastapi-platform/api:1.0.0
+
+services:
+  nginx:
+    <<: *hardening
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    user: "101:101"
+    ports:
+      - "80:8080"                    # the only published port in the stack
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    tmpfs:
+      - /tmp:size=16m                # pid file and proxy buffers
+    networks: [dmz]
+    depends_on:
+      app:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 128M, pids: 100 }
+
+  app:
+    <<: [*hardening, *api-image]
+    user: "10001:10001"
+    environment:
+      DB_HOST: postgres
+      DB_NAME: app
+      DB_USER: app
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      REDIS_HOST: redis
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+    secrets: [db_password, redis_password]
+    tmpfs:
+      - /tmp:size=64m
+    networks: [dmz, backend_net]     # no ports: reachable only through nginx
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M, pids: 200 }
+        reservations: { memory: 256M }
+
+  migrate:
+    <<: [*hardening, *api-image]
+    user: "10001:10001"
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"                    # one-shot: overrides the shared policy
+    environment:
+      DB_HOST: postgres
+      DB_NAME: app
+      DB_USER: app
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    tmpfs:
+      - /tmp:size=16m
+    networks: [backend_net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    <<: *hardening
+    image: postgres:16-alpine
+    user: "70:70"                    # image-native postgres UID; no root entrypoint step
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    tmpfs:
+      - /var/run/postgresql:size=1m  # Unix socket and lock file
+      - /tmp:size=16m
+    shm_size: 128mb
+    networks: [backend_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    stop_grace_period: 60s           # time to checkpoint before SIGKILL
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1G, pids: 300 }
+
+  redis:
+    <<: *hardening
+    image: redis:7-alpine
+    user: "999:1000"
+    # The password arrives on stdin ("-"), so it never appears in the process list.
+    # $$ escapes Compose interpolation so the shell evaluates $(cat ...).
+    command:
+      - sh
+      - -c
+      - |
+        exec redis-server - \
+          --maxmemory 192mb \
+          --maxmemory-policy allkeys-lru \
+          --save "" \
+          --appendonly no <<EOF
+        requirepass $$(cat /run/secrets/redis_password)
+        EOF
+    secrets: [redis_password]
+    networks: [backend_net]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M, pids: 100 }
+
+networks:
+  dmz:
+    driver: bridge
+  backend_net:
+    driver: bridge
+    internal: true                   # no route to the outside world
+
+volumes:
+  pgdata:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  redis_password:
+    file: ./secrets/redis_password.txt

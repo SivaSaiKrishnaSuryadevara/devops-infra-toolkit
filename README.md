@@ -9,6 +9,7 @@ as the reference workload.
 - `docker-compose.yml` - local development stack: API service, Redis, Postgres, and an nginx reverse proxy.
 - `k8s/` - Kubernetes manifests: Deployment, Service, and a HorizontalPodAutoscaler.
 - `terraform/` - a minimal AWS module provisioning a VPC and an ECS Fargate service behind an ALB.
+- `production-compose/` - a hardened Docker Compose v2 topology: health-gated startup, a one-shot migration service, segmented `dmz`/`backend_net` networks, file-based secrets, resource limits, and non-root read-only containers.
 
 ## Local development
 
